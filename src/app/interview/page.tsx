@@ -255,17 +255,20 @@ export default function InterviewPage() {
 
     ws.onerror = (error) => {
       console.error("[WebSocket] Error:", error);
-      setErrorDetails("Connection to the interview server failed. Please check your internet connection and try again.");
+      setErrorDetails("Connection to the interview server failed. Please ensure the backend server is running and accessible at the configured URL. Then check your internet connection and try again.");
       setInterviewState("ws_error");
-      addMessage("system", "WebSocket connection error.");
+      addMessage("system", "WebSocket connection error. Ensure backend is running.");
     };
 
     ws.onclose = (event) => {
       console.log("[WebSocket] Closed.", event.code, event.reason);
       if (interviewState !== "interview_ended_by_ai" && interviewState !== "interview_ended_by_user" && interviewState !== "summary_displayed") {
-         setErrorDetails(`Connection closed: ${event.reason || 'Unknown reason'}. Code: ${event.code}`);
-         setInterviewState("ws_error");
-         addMessage("system", `WebSocket connection closed. Code: ${event.code}`);
+         // If ws.onerror already set an error, don't override with a generic "connection closed"
+         if (interviewState !== "ws_error") {
+            setErrorDetails(`Connection closed: ${event.reason || 'Unknown reason'}. Code: ${event.code}. Please ensure the backend server is running.`);
+            setInterviewState("ws_error");
+         }
+         addMessage("system", `WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`);
       }
       webSocketRef.current = null;
     };
@@ -653,3 +656,4 @@ export default function InterviewPage() {
     </div>
   );
 }
+
