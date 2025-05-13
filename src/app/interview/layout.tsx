@@ -24,16 +24,18 @@ export default function InterviewLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="scroll-smooth">
-      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased bg-background text-foreground`}>
-        <div className="flex flex-col min-h-screen">
-          {/* Minimal layout, can add a simple header/footer if needed later */}
-          <main className="flex-grow container mx-auto px-4 py-8">
-            {children}
-          </main>
-        </div>
-        <Toaster />
-      </body>
-    </html>
+    // Removed <html> and <body> tags as they are handled by the root layout
+    // Ensured className is applied to a div or fragment if necessary,
+    // but for a layout, children are directly rendered within the parent's body.
+    // The font variables are already applied in the root layout.
+    <>
+      <div className="flex flex-col min-h-screen bg-background text-foreground">
+        {/* Minimal layout, can add a simple header/footer if needed later */}
+        <main className="flex-grow container mx-auto px-4 py-8">
+          {children}
+        </main>
+      </div>
+      <Toaster />
+    </>
   );
 }
