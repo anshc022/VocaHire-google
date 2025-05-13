@@ -1,0 +1,17 @@
+fastapi>=0.104.1
+uvicorn[standard]>=0.23.2
+websockets>=11.0.3
+python-multipart>=0.0.6
+
+# Placeholder for STT (e.g., OpenAI Whisper or whisper.cpp)
+# openai-whisper
+
+# Placeholder for LLM (e.g., Ollama client)
+# ollama
+
+# Placeholder for TTS (e.g., Bark or Coqui TTS)
+# TTS
+# bark
+
+# For PDF generation (optional)
+# reportlab
