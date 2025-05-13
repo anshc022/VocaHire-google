@@ -153,7 +153,7 @@ export default function InterviewPage() {
              const lastAiMsg = messages.slice().reverse().find(m => m.speaker === 'ai');
              if (lastAiMsg && (lastAiMsg.text.includes("?") || lastAiMsg.text.toLowerCase().includes("tell me about") || lastAiMsg.text.toLowerCase().includes("what are") || lastAiMsg.text.toLowerCase().includes("can you"))) {
                 setInterviewState("ready_to_listen");
-             } else if (interviewState !== "interview_ended_by_ai" && interviewState !== "summary_displayed") {
+             } else if (interviewState !== "interview_ended_by_ai" && interviewState !== "summary_displayed" && interviewState !== "fetching_summary") {
                 // If not clearly a question, might be part of ongoing AI speech or waiting for signal
                 // This logic could be refined based on exact backend signals
                 setInterviewState("ai_speaking"); // Or a more specific "waiting_for_ai_next_segment"
@@ -170,7 +170,7 @@ export default function InterviewPage() {
     } else {
         isPlayingAudioRef.current = false; // Should not happen if length > 0 check passed
     }
-  }, [addMessage, messages, interviewState]);
+  }, [addMessage, messages, interviewState, playNextAudioChunk]);
 
 
   const connectWebSocket = useCallback((sId: string) => {
@@ -246,7 +246,7 @@ export default function InterviewPage() {
         } else if (messageText === "INTERVIEW_ENDED_BY_AI") {
           addMessage("system", "The AI has concluded the interview.");
           setInterviewState("interview_ended_by_ai");
-          fetchInterviewSummary(sId);
+          if (sId) fetchInterviewSummary(sId); // sId available in this scope
         } else {
           addMessage("system", `Server: ${messageText}`);
         }
@@ -257,22 +257,47 @@ export default function InterviewPage() {
       console.error("[WebSocket] Error:", error);
       setErrorDetails("Connection to the interview server failed. Please ensure the backend server is running and accessible at the configured URL. Then check your internet connection and try again.");
       setInterviewState("ws_error");
-      addMessage("system", "WebSocket connection error. Ensure backend is running.");
+      addMessage("system", "WebSocket connection error. Ensure backend is running and check console for details.");
     };
 
     ws.onclose = (event) => {
       console.log("[WebSocket] Closed.", event.code, event.reason);
-      if (interviewState !== "interview_ended_by_ai" && interviewState !== "interview_ended_by_user" && interviewState !== "summary_displayed") {
-         // If ws.onerror already set an error, don't override with a generic "connection closed"
-         if (interviewState !== "ws_error") {
-            setErrorDetails(`Connection closed: ${event.reason || 'Unknown reason'}. Code: ${event.code}. Please ensure the backend server is running.`);
-            setInterviewState("ws_error");
-         }
-         addMessage("system", `WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`);
+      // Only set error state if the interview wasn't intentionally ended by AI/user or already in summary/error state
+      if (
+        interviewState !== "interview_ended_by_ai" &&
+        interviewState !== "interview_ended_by_user" &&
+        interviewState !== "summary_displayed" &&
+        interviewState !== "fetching_summary" 
+      ) {
+        if (interviewState !== "ws_error") { // Avoid overriding a more specific error from ws.onerror
+          let closeReasonMessage = `Connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}.`;
+          if (event.code === 1006) {
+            closeReasonMessage = `Connection to the server was lost unexpectedly (Code: 1006). This could be due to a server-side issue or a network problem. Please ensure the backend server is running and accessible, then try again.`;
+          } else if (event.code === 1000 && event.reason === "Interview ended by client") {
+            // This is an expected closure when user ends interview, but we may still want to fetch summary.
+            // The state should already be interview_ended_by_user handled by handleEndInterviewByUser
+            // No need to set errorDetails or change state here.
+            closeReasonMessage = `WebSocket closed by client. Code: ${event.code}.`;
+          } else if (!event.reason && event.code !== 1000) { // 1000 is normal closure often without reason
+             closeReasonMessage = `Connection closed unexpectedly (Code: ${event.code}). Please check your connection and ensure the backend server is running.`;
+          }
+          
+          // Only set error if it's not an expected closure from client ending interview
+          if (!(event.code === 1000 && event.reason === "Interview ended by client")) {
+             setErrorDetails(closeReasonMessage);
+             setInterviewState("ws_error");
+          }
+          addMessage("system", closeReasonMessage);
+        } else {
+          // If ws_error was already set by onerror, just log the close event without changing message/state
+           const subsequentCloseMessage = `WebSocket connection subsequently closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`;
+          addMessage("system", subsequentCloseMessage);
+          console.log(subsequentCloseMessage);
+        }
       }
-      webSocketRef.current = null;
+      webSocketRef.current = null; // Clear the ref
     };
-  }, [addMessage, playNextAudioChunk, interviewState]);
+  }, [addMessage, playNextAudioChunk, interviewState, fetchInterviewSummary]);
 
 
   const handleStartInterview = async () => {
@@ -390,25 +415,34 @@ export default function InterviewPage() {
 
   const handleEndInterviewByUser = () => {
     addMessage("system", "You have chosen to end the interview.");
+    setInterviewState("interview_ended_by_user"); // Set state before potential WS close
     if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
       webSocketRef.current.send("END_INTERVIEW");
+      // ws.onclose will handle eventual closure, might try to fetch summary there or here
     }
-    // WS onclose might not fire immediately or if server closes first.
-    // So, proceed to fetch summary if sessionId exists.
-    if (sessionId) {
-      fetchInterviewSummary(sessionId);
-    }
-    setInterviewState("interview_ended_by_user");
+    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
         mediaRecorderRef.current.stop();
     }
+    // Fetch summary immediately after ending from user side
+    if (sessionId) {
+      fetchInterviewSummary(sessionId);
+    }
   };
 
-  const fetchInterviewSummary = async (sId: string) => {
+  const fetchInterviewSummary = useCallback(async (sId: string) => {
     if (!sId) {
       addMessage("system", "Session ID missing, cannot fetch summary.");
+      setErrorDetails("Cannot fetch summary: Session ID is missing.");
+      setInterviewState("error"); // Or a more specific state like 'summary_error'
       return;
     }
+    // Prevent multiple fetches if already fetching or displayed
+    if (interviewState === "fetching_summary" || interviewState === "summary_displayed") {
+        console.log("Summary fetch already in progress or completed.");
+        return;
+    }
+
     setInterviewState("fetching_summary");
     addMessage("system", "Fetching interview summary...");
     try {
@@ -423,28 +457,31 @@ export default function InterviewPage() {
         throw new Error(`Failed to fetch summary: ${response.status} ${errorData}`);
       }
       const summaryData = await response.json();
-      addMessage("system", `Summary Received: Overall Score ${summaryData.evaluation.overall_score}. Full details in console or dedicated summary page.`);
+      addMessage("system", `Summary Received: Overall Score ${summaryData.evaluation.overall_score}. Full details available.`);
       console.log("Interview Summary:", summaryData);
       setInterviewState("summary_displayed");
       // For now, just log. Later, could display parts of it or link to a summary page.
       toast({
         title: "Interview Summary Ready",
-        description: `Overall Score: ${summaryData.evaluation.overall_score}. Check console for full data.`,
+        description: `Overall Score: ${summaryData.evaluation.overall_score}. You can now start a new interview.`,
         duration: 10000,
       });
 
     } catch (error) {
       console.error("Error fetching summary:", error);
-      setErrorDetails(`Could not fetch summary: ${(error as Error).message}`);
+      const errorMessage = `Could not fetch summary: ${(error as Error).message}. The interview data might not have been fully processed or saved.`;
+      setErrorDetails(errorMessage);
       addMessage("system", `Error fetching summary: ${(error as Error).message}`);
       setInterviewState("error"); // Or a specific summary_error state
     } finally {
-        // Ensure WebSocket is closed if it wasn't already
-        if (webSocketRef.current && webSocketRef.current.readyState !== WebSocket.CLOSED) {
+        // Ensure WebSocket is closed if it wasn't already,
+        // unless it was closed due to an error reported by onclose itself
+        if (webSocketRef.current && webSocketRef.current.readyState !== WebSocket.CLOSED && interviewState !== "ws_error") {
+            console.log("Closing WebSocket after summary attempt.");
             webSocketRef.current.close();
         }
     }
-  };
+  }, [addMessage, toast, interviewState]);
 
 
   const getButtonState = () => {
@@ -459,8 +496,9 @@ export default function InterviewPage() {
       return { text: "Requesting Permissions...", icon: <Loader2 className="mr-2 h-5 w-5 animate-spin" />, disabled: true, variant: "outline" };
     }
     // This covers idle state after permissions are granted but WS not yet connected (e.g. refresh after permissions)
-    if (interviewState === "idle" && hasCameraPermission === true && !sessionId) {
-      return { text: "Start Interview Session", icon: <Video className="mr-2 h-5 w-5"/>, disabled: false, action: handleStartInterview, variant: "default" };
+    // Or after an interview is fully completed and summary displayed
+    if ((interviewState === "idle" && hasCameraPermission === true && !sessionId) || interviewState === "summary_displayed") {
+      return { text: "Start New Interview", icon: <Video className="mr-2 h-5 w-5"/>, disabled: false, action: handleStartInterview, variant: "default" };
     }
 
 
@@ -482,13 +520,11 @@ export default function InterviewPage() {
       // End states
       case "interview_ended_by_ai":
       case "interview_ended_by_user":
-        // After ending, if summary not yet fetched, it will move to fetching_summary
         // This state might be brief or skipped if fetchSummary is called immediately
-        return { text: "Interview Ended", icon: <CheckCircle2 className="mr-2 h-5 w-5" />, disabled: true, variant: "secondary" };
+        return { text: "Interview Ended, Preparing Report...", icon: <Loader2 className="mr-2 h-5 w-5 animate-spin" />, disabled: true, variant: "secondary" };
       case "fetching_summary":
         return { text: "Generating Your Report...", icon: <Loader2 className="mr-2 h-5 w-5 animate-spin" />, disabled: true, variant: "outline" };
-      case "summary_displayed":
-        return { text: "View Report (See Console)", icon: <FileText className="mr-2 h-5 w-5" />, disabled: true, variant: "secondary" }; // Or link to report page
+      // summary_displayed handled above to show "Start New Interview"
 
       // Error states
       case "ws_error":
@@ -618,7 +654,7 @@ export default function InterviewPage() {
           )}
           
           {/* Main action button - shown if not in summary display state */}
-          {interviewState !== "summary_displayed" && (
+          {/* {interviewState !== "summary_displayed" && ( // This condition is now handled by getButtonState logic
              <Button 
                 size="lg" 
                 onClick={buttonState.action}
@@ -629,7 +665,19 @@ export default function InterviewPage() {
               {buttonState.icon}
               {buttonState.text}
             </Button>
-          )}
+          )} */}
+          
+          <Button 
+            size="lg" 
+            onClick={buttonState.action}
+            disabled={buttonState.disabled} 
+            className="w-full py-6 text-lg mt-4"
+            variant={buttonState.variant as any}
+          >
+            {buttonState.icon}
+            {buttonState.text}
+          </Button>
+
 
            {showEndInterviewButton && (
                 <Button 
@@ -638,17 +686,17 @@ export default function InterviewPage() {
                     className="w-full py-6 text-lg mt-2"
                     variant="outline"
                 >
-                    <StopCircle className="mr-2 h-5 w-5 text-destructive"/> End Interview
+                    <StopCircle className="mr-2 h-5 w-5 text-destructive"/> End Interview & Get Report
                 </Button>
             )}
 
 
-           {interviewState === "summary_displayed" && (
+           {interviewState === "summary_displayed" && errorDetails === null && ( // Only show success if no errorDetails
              <div className="text-center p-6 bg-green-50 border border-green-200 rounded-md shadow-md">
                 <CheckCircle2 className="h-16 w-16 text-green-600 mx-auto mb-3"/>
                 <p className="text-xl font-semibold text-green-700">Interview Completed!</p>
-                <p className="text-md text-green-600 mt-1">Your interview report has been generated (details in console).</p>
-                 <Button onClick={() => window.location.href = '/'} className="mt-6" variant="outline">Back to Home</Button>
+                <p className="text-md text-green-600 mt-1">Your interview report has been generated. You can start a new interview or review details in the console.</p>
+                 {/* Button to start new interview is already handled by getButtonState */}
              </div>
             )}
         </CardContent>
@@ -656,4 +704,3 @@ export default function InterviewPage() {
     </div>
   );
 }
-
