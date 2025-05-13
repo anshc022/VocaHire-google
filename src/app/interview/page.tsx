@@ -151,9 +151,9 @@ export default function InterviewPage() {
             // If queue is empty, AI might have finished speaking this turn
             // Check if the last AI message implies a question
              const lastAiMsg = messages.slice().reverse().find(m => m.speaker === 'ai');
-             if (lastAiMsg && (lastAiMsg.text.includes("?") || lastAiMsg.text.toLowerCase().includes("tell me about"))) {
+             if (lastAiMsg && (lastAiMsg.text.includes("?") || lastAiMsg.text.toLowerCase().includes("tell me about") || lastAiMsg.text.toLowerCase().includes("what are") || lastAiMsg.text.toLowerCase().includes("can you"))) {
                 setInterviewState("ready_to_listen");
-             } else if (interviewState !== "interview_ended_by_ai") {
+             } else if (interviewState !== "interview_ended_by_ai" && interviewState !== "summary_displayed") {
                 // If not clearly a question, might be part of ongoing AI speech or waiting for signal
                 // This logic could be refined based on exact backend signals
                 setInterviewState("ai_speaking"); // Or a more specific "waiting_for_ai_next_segment"
@@ -162,7 +162,7 @@ export default function InterviewPage() {
         };
       } catch (e) {
         console.error("Error decoding or playing audio data:", e);
-        addMessage("system", `Error playing audio: ${e.message}`);
+        addMessage("system", `Error playing audio: ${(e as Error).message}`);
         isPlayingAudioRef.current = false;
         // Potentially skip this chunk and try next
         playNextAudioChunk(); 
@@ -181,7 +181,9 @@ export default function InterviewPage() {
     setInterviewState("initializing_ws");
     addMessage("system", "Attempting to connect to interview server...");
 
-    const ws = new WebSocket(`${process.env.NEXT_PUBLIC_BACKEND_WS_URL || 'ws://localhost:8000'}/ws/interview/${sId}`);
+    // Ensure NEXT_PUBLIC_BACKEND_WS_URL is defined or default to localhost
+    const wsUrl = process.env.NEXT_PUBLIC_BACKEND_WS_URL || 'ws://localhost:8000';
+    const ws = new WebSocket(`${wsUrl}/ws/interview/${sId}`);
     webSocketRef.current = ws;
 
     ws.onopen = () => {
@@ -272,6 +274,15 @@ export default function InterviewPage() {
 
   const handleStartInterview = async () => {
     setErrorDetails(null);
+    // Reset messages from previous session if any
+    setMessages([]);
+    audioQueueRef.current = [];
+    if(isPlayingAudioRef.current && aiAudioSourceNodeRef.current) {
+        aiAudioSourceNodeRef.current.stop();
+        aiAudioSourceNodeRef.current = null;
+        isPlayingAudioRef.current = false;
+    }
+
     const permissionsGranted = await requestCameraAndMicPermission();
     if (permissionsGranted) {
       const newSessionId = uuidv4();
@@ -301,7 +312,7 @@ export default function InterviewPage() {
         'audio/webm;codecs=opus',
         'audio/ogg;codecs=opus',
         'audio/wav',
-        'audio/mp4',
+        'audio/mp4', // Some browsers might support this for audio-only
       ];
       let chosenMimeType = '';
       for (const mimeType of mimeTypes) {
@@ -311,11 +322,14 @@ export default function InterviewPage() {
         }
       }
       if (!chosenMimeType) {
-        throw new Error("No supported MIME type found for MediaRecorder");
+        // Fallback if specific ones not found. Browser might pick one.
+        // Or throw error if strictness is required
+        console.warn("No preferred MIME type supported, letting browser choose.");
+        // throw new Error("No supported MIME type found for MediaRecorder");
       }
-      console.log("Using MIME type:", chosenMimeType);
+      console.log("Using MIME type for MediaRecorder:", chosenMimeType || "Browser default");
 
-      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: chosenMimeType });
+      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: chosenMimeType || undefined });
       userAudioChunksRef.current = [];
 
       mediaRecorderRef.current.ondataavailable = (event) => {
@@ -335,10 +349,10 @@ export default function InterviewPage() {
       };
       
       mediaRecorderRef.current.onerror = (event) => {
-        console.error("MediaRecorder error:", event.error);
-        addMessage("system", `Recording error: ${event.error.name}`);
+        console.error("MediaRecorder error:", (event as any).error || event);
+        addMessage("system", `Recording error: ${(event as any).error?.name || 'Unknown error'}`);
         setInterviewState("error");
-        setErrorDetails(`Recording error: ${event.error.message}. Try again.`);
+        setErrorDetails(`Recording error: ${(event as any).error?.message || 'Try again.'}`);
       };
 
       mediaRecorderRef.current.start(1000); // Send chunks every 1 second
@@ -346,9 +360,9 @@ export default function InterviewPage() {
       addMessage("system", "You are now recording...");
     } catch (e) {
       console.error("Error starting MediaRecorder:", e);
-      addMessage("system", `Failed to start recording: ${e.message}`);
+      addMessage("system", `Failed to start recording: ${(e as Error).message}`);
       setInterviewState("error");
-      setErrorDetails(`Could not start audio recording: ${e.message}`);
+      setErrorDetails(`Could not start audio recording: ${(e as Error).message}`);
     }
   };
 
@@ -361,7 +375,7 @@ export default function InterviewPage() {
   
   const handleMicClick = () => {
     if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-        audioContextRef.current.resume(); // Ensure AudioContext is running
+        audioContextRef.current.resume().catch(e => console.error("Error resuming AudioContext:", e));
     }
 
     if (interviewState === "ready_to_listen") {
@@ -395,7 +409,8 @@ export default function InterviewPage() {
     setInterviewState("fetching_summary");
     addMessage("system", "Fetching interview summary...");
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_HTTP_URL || 'http://localhost:8000'}/api/interview/summary`, {
+      const httpUrl = process.env.NEXT_PUBLIC_BACKEND_HTTP_URL || 'http://localhost:8000';
+      const response = await fetch(`${httpUrl}/api/interview/summary`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sId }),
@@ -417,8 +432,8 @@ export default function InterviewPage() {
 
     } catch (error) {
       console.error("Error fetching summary:", error);
-      setErrorDetails(`Could not fetch summary: ${error.message}`);
-      addMessage("system", `Error fetching summary: ${error.message}`);
+      setErrorDetails(`Could not fetch summary: ${(error as Error).message}`);
+      addMessage("system", `Error fetching summary: ${(error as Error).message}`);
       setInterviewState("error"); // Or a specific summary_error state
     } finally {
         // Ensure WebSocket is closed if it wasn't already
@@ -431,7 +446,7 @@ export default function InterviewPage() {
 
   const getButtonState = () => {
     // Initial state before permissions and connection
-    if (interviewState === "idle" && !sessionId && !hasCameraPermission) {
+    if (interviewState === "idle" && !sessionId && hasCameraPermission === null) {
       return { text: "Begin Interview & Setup Camera", icon: <Video className="mr-2 h-5 w-5"/>, disabled: false, action: handleStartInterview, variant: "default" };
     }
     if (interviewState === "permissions_denied") {
@@ -439,6 +454,10 @@ export default function InterviewPage() {
     }
      if (interviewState === "requesting_permissions" ) {
       return { text: "Requesting Permissions...", icon: <Loader2 className="mr-2 h-5 w-5 animate-spin" />, disabled: true, variant: "outline" };
+    }
+    // This covers idle state after permissions are granted but WS not yet connected (e.g. refresh after permissions)
+    if (interviewState === "idle" && hasCameraPermission === true && !sessionId) {
+      return { text: "Start Interview Session", icon: <Video className="mr-2 h-5 w-5"/>, disabled: false, action: handleStartInterview, variant: "default" };
     }
 
 
@@ -460,6 +479,8 @@ export default function InterviewPage() {
       // End states
       case "interview_ended_by_ai":
       case "interview_ended_by_user":
+        // After ending, if summary not yet fetched, it will move to fetching_summary
+        // This state might be brief or skipped if fetchSummary is called immediately
         return { text: "Interview Ended", icon: <CheckCircle2 className="mr-2 h-5 w-5" />, disabled: true, variant: "secondary" };
       case "fetching_summary":
         return { text: "Generating Your Report...", icon: <Loader2 className="mr-2 h-5 w-5 animate-spin" />, disabled: true, variant: "outline" };
@@ -468,18 +489,21 @@ export default function InterviewPage() {
 
       // Error states
       case "ws_error":
-        return { text: "Connection Lost. Retry?", icon: <WifiOff className="mr-2 h-5 w-5" />, disabled: false, action: handleStartInterview, variant: "destructive" };
+        return { text: "Connection Lost. Retry Interview?", icon: <WifiOff className="mr-2 h-5 w-5" />, disabled: false, action: handleStartInterview, variant: "destructive" };
       case "error":
-         return { text: "Error Occurred. Retry?", icon: <AlertTriangle className="mr-2 h-5 w-5" />, disabled: false, action: handleStartInterview, variant: "destructive" };
+         return { text: "Error Occurred. Retry Interview?", icon: <AlertTriangle className="mr-2 h-5 w-5" />, disabled: false, action: handleStartInterview, variant: "destructive" };
       
-      default: // Includes "idle" after initial connection
-        if (sessionId) return { text: "AI is Ready", icon: <Mic className="mr-2 h-5 w-5 text-muted-foreground" />, disabled: true, variant: "outline" }; // Fallback, should be more specific
+      default: 
+        if (sessionId && (interviewState === "idle" || interviewState === "ws_connected_waiting_initial_ai")) { // Catch-all if WS connected but no specific AI/User state
+          return { text: "AI is Preparing...", icon: <Loader2 className="mr-2 h-5 w-5 animate-spin" />, disabled: true, variant: "outline" }; 
+        }
+        // Default fallback if none of the above matched, similar to initial idle
         return { text: "Start Interview", icon: <Video className="mr-2 h-5 w-5"/>, disabled: false, action: handleStartInterview, variant: "default" };
     }
   };
   
   const buttonState = getButtonState();
-  const showEndInterviewButton = sessionId && !["interview_ended_by_ai", "interview_ended_by_user", "fetching_summary", "summary_displayed", "ws_error", "error"].includes(interviewState);
+  const showEndInterviewButton = sessionId && !["idle", "requesting_permissions", "permissions_denied", "interview_ended_by_ai", "interview_ended_by_user", "fetching_summary", "summary_displayed", "ws_error", "error"].includes(interviewState);
 
 
   return (
@@ -525,9 +549,9 @@ export default function InterviewPage() {
                 <Image 
                     src="https://picsum.photos/seed/ai-interviewer-professional/640/360" 
                     alt="AI Interviewer" 
-                    fill // Use fill instead of layout
-                    sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw" // Add sizes for responsiveness
-                    style={{objectFit: "cover"}} // Use style for objectFit
+                    fill 
+                    sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw" 
+                    style={{objectFit: "cover"}} 
                     className="opacity-80"
                     data-ai-hint="professional person"
                     priority
@@ -536,7 +560,7 @@ export default function InterviewPage() {
                 <div className="absolute bottom-2 left-2 bg-black/60 text-white px-3 py-1 rounded-md text-sm backdrop-blur-sm">
                     AI Interviewer
                 </div>
-                {interviewState === "ai_speaking" && isPlayingAudioRef.current && ( // Show loader when AI is actively speaking (audio playing)
+                {interviewState === "ai_speaking" && isPlayingAudioRef.current && ( 
                     <div className="absolute inset-0 flex items-center justify-center bg-black/30">
                         <Loader2 className="w-10 h-10 text-white animate-spin" />
                     </div>
@@ -561,8 +585,8 @@ export default function InterviewPage() {
                     className={`max-w-[75%] p-3 rounded-xl shadow ${
                         msg.speaker === 'user' ? 'bg-primary text-primary-foreground' : 
                         msg.speaker === 'ai' ? 'bg-card border' : 
-                        msg.speaker === 'stt' ? 'bg-blue-100 text-blue-700 border border-blue-200 text-sm' : // STT specific style
-                        'bg-muted text-muted-foreground text-sm italic' // System messages
+                        msg.speaker === 'stt' ? 'bg-blue-100 text-blue-700 border border-blue-200 text-sm' : 
+                        'bg-muted text-muted-foreground text-sm italic' 
                     }`}
                   >
                     <p className="whitespace-pre-wrap">{msg.text}</p>
@@ -629,5 +653,3 @@ export default function InterviewPage() {
     </div>
   );
 }
-
-```
