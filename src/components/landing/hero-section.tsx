@@ -23,7 +23,7 @@ export function HeroSection() {
             size="lg" 
             className="bg-accent text-accent-foreground hover:bg-accent/90 transition-all duration-300 ease-in-out hover:scale-105 hover:shadow-lg px-10 py-6 text-lg rounded-lg"
           >
-            <Link href="#">Start Your Free Interview</Link>
+            <Link href="/interview">Start Your Free Interview</Link>
           </Button>
           <Button 
             asChild 
